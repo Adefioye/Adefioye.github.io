@@ -6,8 +6,8 @@ const siteMetadata = {
   description: 'Writing about AI, deep learning, and software engineering.',
   language: 'en-us',
   theme: 'system', // system, dark or light
-  siteUrl: 'https://adefioye.github.io/koko-blog',
-  siteRepo: 'https://github.com/Adefioye/koko-blog',
+  siteUrl: 'https://adefioye.github.io',
+  siteRepo: 'https://github.com/Adefioye/Adefioye.github.io',
   siteLogo: `${process.env.BASE_PATH || ''}/static/images/logo.png`,
   socialBanner: `${process.env.BASE_PATH || ''}/static/images/twitter-card.png`,
   mastodon: 'https://mastodon.social/@mastodonuser',
