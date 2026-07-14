@@ -1,7 +1,7 @@
-const TableWrapper = ({ children }) => {
+const TableWrapper = ({ children, ...props }) => {
   return (
     <div className="w-full overflow-x-auto">
-      <table>{children}</table>
+      <table {...props}>{children}</table>
     </div>
   )
 }

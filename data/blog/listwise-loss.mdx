@@ -1,5 +1,5 @@
 ---
-title: 'Listwise loss does not consistently makeup for InfoNCE loss'
+title: 'Listwise loss does not consistently makeup for retrieval performance drop induced by InfoNCE loss'
 date: '2025-11-12'
 tags: ['dense retrieval', 'contrastive learning', 'reranking', 'distillation', 'synthetic data']
 draft: false
@@ -9,12 +9,12 @@ summary: Replicating Tamber et al. with Nomic-Embed and ModernBERT-Embed shows t
 ## Motivation
 Tamber et al. argue that conventional InfoNCE contrastive learning often reduces retrieval effectiveness when strong dense retrievers are fine-tuned on corpus-specific synthetic data [1]. Their proposed fix is to combine contrastive learning with cross-encoder listwise distillation, where a stronger reranker provides a richer relevance distribution over the retrieved passages.
 
-This post is a write-up of our replication of that finding. The core questions are the following: does contrastive loss always fall short when applied to newer embedding models such as Nomic-Embed and ModernBERT-Embed? We also wanted to test whether combining InfoNCE with a KL/listwise distillation objective would recover the retrieval performance drop caused by InfoNCE loss as observed in the paper.
+This post is a write-up of our replication of that work. The core questions are the following: does contrastive loss always fall short when applied to newer embedding models such as Nomic-Embed [2] and ModernBERT-Embed [3]? We also wanted to test whether combining InfoNCE with a KL/listwise distillation objective would recover the retrieval performance drop caused by InfoNCE loss as observed in the paper.
 
 The short answer is that the result somewhat contradicts the findings of Tamber et al. For ModernBERT-Embed, InfoNCE loss reduced retrieval effectiveness on most datasets, and combined loss was unable to help recover the performance drop. For Nomic-Embed, however, InfoNCE fine-tuning generally improved retrieval effectiveness except MSMARCO contrary to the work of Tamber et al. This is the main reason we think the stronger claim is not that contrastive learning always fails, but that it is fragile and possibly model-dependent.
 
 ## Methodology and Experiments
-The experiments followed the general structure of Tamber et al. We evaluated base retrievers, reranked their retrieved passages with RankT5-3B, generated and filtered synthetic training data, and then fine-tuned Nomic-Embed and ModernBERT-Embed with either pure InfoNCE or a combined InfoNCE + KL/listwise loss.
+The experiments followed the general structure of Tamber et al. We evaluated base retrievers, reranked their retrieved passages with RankT5-3B [4], generated and filtered synthetic training data, and then fine-tuned Nomic-Embed and ModernBERT-Embed with either pure InfoNCE or a combined InfoNCE + KL/listwise loss.
 
 The following procedures were followed:
 1. We generated and filtered synthetic training data, both queries and passages.
@@ -90,18 +90,27 @@ The joint loss used the same broad motivation as Tamber et al.: preserve the con
 ### Reranking shows why distillation is worth trying
 Before fine-tuning, RankT5-3B substantially improved over the Nomic-Embed retriever when reranking the top 1000 passages as shown in Table 1. This matters because it shows that the teacher model has useful ranking behavior that the dense retriever does not yet capture.
 
-| Dataset | Nomic-Embed | RankT5-3B |
-| --- | ---: | ---: |
-| TREC-COVID | 63.9 | **79.6** |
-| NFCorpus | 31.4 | **39.3** |
-| FiQA | 28.7 | **47.4** |
-| SCIDOCS | 12.7 | **18.3** |
-| ArguAna | 32.7 | **34.8** |
-| Touché-2020 | 31.0 | **38.2** |
-| Climate-FEVER | 25.3 | **29.4** |
-| SciFact | 53.0 | **72.4** |
+<table style={{ width: 'auto', marginLeft: 'auto', marginRight: 'auto' }}>
+  <thead>
+    <tr>
+      <th>Dataset</th>
+      <th style={{ textAlign: 'right' }}>Nomic-Embed</th>
+      <th style={{ textAlign: 'right' }}>RankT5-3B</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>TREC-COVID</td><td style={{ textAlign: 'right' }}>63.9</td><td style={{ textAlign: 'right' }}><strong>79.6</strong></td></tr>
+    <tr><td>NFCorpus</td><td style={{ textAlign: 'right' }}>31.4</td><td style={{ textAlign: 'right' }}><strong>39.3</strong></td></tr>
+    <tr><td>FiQA</td><td style={{ textAlign: 'right' }}>28.7</td><td style={{ textAlign: 'right' }}><strong>47.4</strong></td></tr>
+    <tr><td>SCIDOCS</td><td style={{ textAlign: 'right' }}>12.7</td><td style={{ textAlign: 'right' }}><strong>18.3</strong></td></tr>
+    <tr><td>ArguAna</td><td style={{ textAlign: 'right' }}>32.7</td><td style={{ textAlign: 'right' }}><strong>34.8</strong></td></tr>
+    <tr><td>Touché-2020</td><td style={{ textAlign: 'right' }}>31.0</td><td style={{ textAlign: 'right' }}><strong>38.2</strong></td></tr>
+    <tr><td>Climate-FEVER</td><td style={{ textAlign: 'right' }}>25.3</td><td style={{ textAlign: 'right' }}><strong>29.4</strong></td></tr>
+    <tr><td>SciFact</td><td style={{ textAlign: 'right' }}>53.0</td><td style={{ textAlign: 'right' }}><strong>72.4</strong></td></tr>
+  </tbody>
+</table>
 
-_Table 1:_ NDCG@10 for Nomic-Embed and RankT5-3B.
+<p style={{ textAlign: 'center' }}><em>Table 1:</em> NDCG@10 for Nomic-Embed and RankT5-3B.</p>
 
 The top-1 relevance numbers tell a similar story. After reranking, the percentage of relevant documents at rank 1 rose across every dataset tested for both ModernBERT-Embed and Nomic-Embed.
 
@@ -275,7 +284,7 @@ ModernBERT-Embed behaved much closer to the finding described by Tamber et al. I
 The combined InfoNCE + KL loss did not recover the lost performance for ModernBERT-Embed. It improved over pure InfoNCE on SciFact, NFCorpus, and ArguAna, but still stayed below the base model on DL19, DL20, SciFact, and FiQA where results were available. This suggests that simply adding a listwise KL term is not automatically enough. New or alternative approaches would be needed to recover retrieval performance and ultimately approach reranker performance.
 
 ### Combined loss was not a clear win in this replication work
-One of the most important findings from Tamber et al. is that combined contrastive and listwise distillation training consistently beat contrastive loss alone across several datasets. My reproduction did not show the same observation.
+One of the most important findings from Tamber et al. is that combined contrastive and listwise distillation training consistently beat contrastive loss alone across several datasets. Our reproduction did not show the same observation.
 
 For Nomic-Embed, the combined loss was worse than pure InfoNCE on most reported datasets. For ModernBERT-Embed, the combined loss improved over pure InfoNCE on several datasets, but it did not restore the original base model's retrieval effectiveness.
 
@@ -284,7 +293,7 @@ This does not invalidate the usefulness of listwise distillation. The reranking 
 ## Conclusion
 This reproduction partially supports Tamber et al. but also complicates the main takeaway. For ModernBERT-Embed, contrastive fine-tuning often fell short. For Nomic-Embed, contrastive fine-tuning often helped, especially on SciFact and ArguAna. Therefore, the failure mode seems less like a universal limitation of InfoNCE and more like an interaction between the base retriever, pre-training data, and the fine-tuning objective.
 
-The most useful next step is not to abandon distillation, but to tune it more carefully. The reranker clearly improves top-ranked relevance, so there is signal to transfer. We would next look at alternative approaches beyong hyperparameter tuning. One such approach is weighted KL-divergence or contrastively weighted KL loss [5], since it is designed to make the distillation term focus more directly on separating relevant and non-relevant passages.
+The most useful next step is not to abandon distillation. The reranker clearly improves top-ranked relevance, so there is signal to transfer. We would next look at alternative approaches beyond hyperparameter tuning. One such approach is weighted KL-divergence or contrastively weighted KL loss [5], since it is designed to make the distillation term focus more directly on separating relevant and non-relevant passages.
 
 ## Code 
 Available [here](https://github.com/Adefioye/vector-search-experiment)
@@ -306,7 +315,7 @@ If you find this article useful, please cite it as:
 
 ```text
 @article{abdulhakeem2025listwise-loss,
-  title={Listwise loss does not consistently makeup for InfoNCE loss},
+  title={Listwise loss does not consistently makeup for retrieval performance drop induced by InfoNCE loss},
   author={Abdulhakeem, Adefioye},
   year={2025},
   month={November},
