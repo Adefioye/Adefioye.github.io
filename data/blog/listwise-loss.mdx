@@ -1,0 +1,315 @@
+---
+title: 'Listwise loss does not consistently makeup for InfoNCE loss'
+date: '2025-11-12'
+tags: ['dense retrieval', 'contrastive learning', 'reranking', 'distillation', 'synthetic data']
+draft: false
+summary: Replicating Tamber et al. with Nomic-Embed and ModernBERT-Embed shows that conventional contrastive learning can fail, but not uniformly across embedding models.
+---
+
+## Motivation
+Tamber et al. argue that conventional InfoNCE contrastive learning often reduces retrieval effectiveness when strong dense retrievers are fine-tuned on corpus-specific synthetic data [1]. Their proposed fix is to combine contrastive learning with cross-encoder listwise distillation, where a stronger reranker provides a richer relevance distribution over the retrieved passages.
+
+This post is a write-up of our replication of that finding. The core questions are the following: does contrastive loss always fall short when applied to newer embedding models such as Nomic-Embed and ModernBERT-Embed? We also wanted to test whether combining InfoNCE with a KL/listwise distillation objective would recover the retrieval performance drop caused by InfoNCE loss as observed in the paper.
+
+The short answer is that the result somewhat contradicts the findings of Tamber et al. For ModernBERT-Embed, InfoNCE loss reduced retrieval effectiveness on most datasets, and combined loss was unable to help recover the performance drop. For Nomic-Embed, however, InfoNCE fine-tuning generally improved retrieval effectiveness except MSMARCO contrary to the work of Tamber et al. This is the main reason we think the stronger claim is not that contrastive learning always fails, but that it is fragile and possibly model-dependent.
+
+## Methodology and Experiments
+The experiments followed the general structure of Tamber et al. We evaluated base retrievers, reranked their retrieved passages with RankT5-3B, generated and filtered synthetic training data, and then fine-tuned Nomic-Embed and ModernBERT-Embed with either pure InfoNCE or a combined InfoNCE + KL/listwise loss.
+
+The following procedures were followed:
+1. We generated and filtered synthetic training data, both queries and passages.
+2. We retrieved candidate passages for all synthetic queries with dense retrievers(Nomic-Embed and ModernBERT-Embed).
+3. We reranked retrieved passages with reranker, RankT5-3B.
+4. We normalized reranker scores.
+5. We trained retrievers with either InfoNCE or a joint objective.
+6. We evaluated with NDCG@10 and Recall@100.
+
+For the pure contrastive setting, we used the InfoNCE objective from Tamber et al. Let $q_i$ denote the $i$-th query in a batch of $n$ queries, and let $p_i$ denote its positive passage. For another query $q_j$, $p_j$ denotes that query's positive passage when it is used as an in-batch negative for $q_i$, while $p_{jk}$ denotes the $k$-th hard-negative passage retrieved for $q_j$. The dense retriever scoring function is $s_{de}(q, p)$, $K$ is the number of hard negatives per query, and $\tau$ is the temperature parameter. The loss is:
+
+$$
+\mathcal{L}_{\text{InfoNCE}}
+=
+-\frac{1}{n}
+\sum_{i=1}^{n}
+\log
+\frac{
+\exp(s_{de}(q_i, p_i) / \tau)
+}{
+\sum_{j=1}^{n}
+\left(
+\exp(s_{de}(q_i, p_j) / \tau)
++
+\sum_{k=1}^{K}
+\exp(s_{de}(q_i, p_{jk}) / \tau)
+\right)
+}
+$$
+
+For listwise distillation, we followed Tamber et al. by turning dense-retriever scores and cross-encoder scores into relevance distributions over the retrieved list. For a scoring function `s(q, p)`, the normalized score distribution is:
+
+$$
+\tilde{s}(q_i, p_i)
+=
+\frac{
+\exp(s(q_i, p_i) / \tau)
+}{
+\exp(s(q_i, p_i) / \tau)
++
+\sum_{k=1}^{K}
+\exp(s(q_i, p_{ik}) / \tau)
+}
+$$
+
+The listwise term then minimizes the KL divergence between the dense retriever distribution and the cross-encoder distribution:
+
+$$
+\mathcal{L}_{\text{KL}}
+=
+D_{\text{KL}}
+\left(
+\tilde{s}_{ce}(q_i, p)
+\;\|\;
+\tilde{s}_{de}(q_i, p)
+\right)
+$$
+
+The joint objective combines the contrastive and KL/listwise terms:
+
+$$
+\mathcal{L}_{\text{joint}}
+=
+\lambda \mathcal{L}_{\text{InfoNCE}}
++
+(1 - \lambda)\mathcal{L}_{\text{KL}}
+$$
+
+The joint loss used the same broad motivation as Tamber et al.: preserve the contrastive signal while also making the retriever imitate the score distribution of a better cross-encoder reranker. In our implementation, the combined loss used a contrastive loss weight of `0.1`, with the remaining weight placed on the KL/listwise term.
+
+## Results and Discussion
+
+### Reranking shows why distillation is worth trying
+Before fine-tuning, RankT5-3B substantially improved over the Nomic-Embed retriever when reranking the top 1000 passages as shown in Table 1. This matters because it shows that the teacher model has useful ranking behavior that the dense retriever does not yet capture.
+
+| Dataset | Nomic-Embed | RankT5-3B |
+| --- | ---: | ---: |
+| TREC-COVID | 63.9 | **79.6** |
+| NFCorpus | 31.4 | **39.3** |
+| FiQA | 28.7 | **47.4** |
+| SCIDOCS | 12.7 | **18.3** |
+| ArguAna | 32.7 | **34.8** |
+| Touché-2020 | 31.0 | **38.2** |
+| Climate-FEVER | 25.3 | **29.4** |
+| SciFact | 53.0 | **72.4** |
+
+_Table 1:_ NDCG@10 for Nomic-Embed and RankT5-3B.
+
+The top-1 relevance numbers tell a similar story. After reranking, the percentage of relevant documents at rank 1 rose across every dataset tested for both ModernBERT-Embed and Nomic-Embed.
+
+<table>
+  <thead>
+    <tr>
+      <th rowSpan="2">Dataset</th>
+      <th colSpan="3" style={{ textAlign: 'center', verticalAlign: 'middle' }}>ModernBERT-Embed</th>
+      <th colSpan="3" style={{ textAlign: 'center', verticalAlign: 'middle' }}>Nomic-Embed</th>
+    </tr>
+    <tr>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Q</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Before reranking</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>After reranking</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Q</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Before reranking</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>After reranking</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>TREC-COVID</td><td>266335</td><td>72.5</td><td><strong>91.7</strong></td><td>211340</td><td>66.8</td><td><strong>92.2</strong></td></tr>
+    <tr><td>NFCorpus</td><td>9592</td><td>85.7</td><td><strong>95.6</strong></td><td>8415</td><td>79.3</td><td><strong>95.0</strong></td></tr>
+    <tr><td>FiQA</td><td>280455</td><td>64.8</td><td><strong>83.8</strong></td><td>247284</td><td>55.4</td><td><strong>86.6</strong></td></tr>
+    <tr><td>SCIDOCS</td><td>133052</td><td>85.7</td><td><strong>97.0</strong></td><td>131557</td><td>78.2</td><td><strong>97.4</strong></td></tr>
+    <tr><td>ArguAna</td><td>32807</td><td>69.5</td><td><strong>89.2</strong></td><td>31221</td><td>57.1</td><td><strong>89.7</strong></td></tr>
+    <tr><td>Touché-2020</td><td>272907</td><td>50.2</td><td><strong>72.0</strong></td><td>216398</td><td>40.5</td><td><strong>76.7</strong></td></tr>
+    <tr><td>SciFact</td><td>19960</td><td>89.0</td><td><strong>97.8</strong></td><td>22249</td><td>85.4</td><td><strong>98.1</strong></td></tr>
+    <tr><td>MSMARCO</td><td>191859</td><td>59.8</td><td><strong>74.9</strong></td><td>176470</td><td>50.8</td><td><strong>77.6</strong></td></tr>
+  </tbody>
+</table>
+
+_Table 2:_ Number of queries and percentage of relevant documents at rank 1 before and after RankT5-3B reranking.
+
+>Note: Q = Number of queries evaluated.
+
+### Nomic-Embed behaves differently from the Tamber et al.'s main result
+The strongest divergence from Tamber et al. appears with Nomic-Embed. InfoNCE reduced performance on MSMARCO DL19 and DL20, but improved the model on SciFact, NFCorpus, FiQA, and ArguAna.
+
+<table>
+  <thead>
+    <tr>
+      <th rowSpan="3" style={{ textAlign: 'center', verticalAlign: 'middle' }}></th>
+      <th colSpan="4" style={{ textAlign: 'center', verticalAlign: 'middle' }}>MSMARCO</th>
+      <th colSpan="2" rowSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>SCIFACT</th>
+      <th colSpan="2" rowSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>NFCORPUS</th>
+      <th colSpan="2" rowSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>FIQA</th>
+      <th colSpan="2" rowSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>ARGUANA</th>
+    </tr>
+    <tr>
+      <th colSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>DL19</th>
+      <th colSpan="2" style={{ textAlign: 'center', verticalAlign: 'middle' }}>DL20</th>
+    </tr>
+    <tr>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>NDCG</th>
+      <th style={{ textAlign: 'center', verticalAlign: 'middle' }}>Recall</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style={{ borderBottom: 0 }}>Nomic-Embed</td>
+      <td><strong>65.9</strong></td>
+      <td><strong>57.8</strong></td>
+      <td><strong>65.8</strong></td>
+      <td><strong>66.1</strong></td>
+      <td>53.0</td>
+      <td>83.9</td>
+      <td>31.4</td>
+      <td>28.8</td>
+      <td>28.7</td>
+      <td>59.5</td>
+      <td>32.7</td>
+      <td>88.6</td>
+    </tr>
+    <tr>
+      <td style={{ borderTop: 0, borderBottom: 0 }}>+ FT with infonce loss</td>
+      <td>61.0</td>
+      <td>56.3</td>
+      <td>60.0</td>
+      <td>63.6</td>
+      <td><strong>67.2</strong></td>
+      <td>92.6</td>
+      <td><strong>32.5</strong></td>
+      <td><strong>29.0</strong></td>
+      <td><strong>30.1</strong></td>
+      <td><strong>62.9</strong></td>
+      <td><strong>53.2</strong></td>
+      <td><strong>98.1</strong></td>
+    </tr>
+    <tr>
+      <td style={{ borderTop: 0 }}>+ FT with combined loss</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>-</td>
+      <td>67.1</td>
+      <td><strong>92.7</strong></td>
+      <td>29.3</td>
+      <td>28.3</td>
+      <td>-</td>
+      <td>-</td>
+      <td>49.4</td>
+      <td>96.4</td>
+    </tr>
+    <tr>
+      <td style={{ borderBottom: 0 }}>ModernBERT-Embed</td>
+      <td><strong>66.0</strong></td>
+      <td><strong>60.0</strong></td>
+      <td><strong>65.2</strong></td>
+      <td><strong>65.2</strong></td>
+      <td><strong>62.6</strong></td>
+      <td><strong>89.6</strong></td>
+      <td><strong>30.2</strong></td>
+      <td><strong>28.6</strong></td>
+      <td><strong>35.8</strong></td>
+      <td><strong>67.2</strong></td>
+      <td>32.8</td>
+      <td>84.0</td>
+    </tr>
+    <tr>
+      <td style={{ borderTop: 0, borderBottom: 0 }}>+ FT with infonce loss</td>
+      <td>59.5</td>
+      <td>55.5</td>
+      <td>57.6</td>
+      <td>62.5</td>
+      <td>59.2</td>
+      <td>87.4</td>
+      <td>27.5</td>
+      <td>25.7</td>
+      <td>34.6</td>
+      <td>65.5</td>
+      <td>43.3</td>
+      <td>94.0</td>
+    </tr>
+    <tr>
+      <td style={{ borderTop: 0 }}>+ FT with combined loss</td>
+      <td>56.7</td>
+      <td>51.7</td>
+      <td>56.0</td>
+      <td>59.0</td>
+      <td>61.8</td>
+      <td>88.4</td>
+      <td>28.8</td>
+      <td>28.3</td>
+      <td>-</td>
+      <td>-</td>
+      <td><strong>46.7</strong></td>
+      <td><strong>94.9</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+_Table 3:_ NDCG@10 and Recall@100 for base and fine-tuned Nomic-Embed and ModernBERT-Embed models. Dashes indicate runs not reported in the current result document.
+
+For Nomic-Embed, InfoNCE improved SciFact NDCG@10 from `53.0` to `67.2`, FiQA from `28.7` to `30.1`, NFCorpus from `31.4` to `32.5`, and ArguAna from `32.7` to `53.2`. These are not small changes, especially on SciFact and ArguAna.
+
+However, MSMARCO moved in the opposite direction. DL19 NDCG@10 dropped from `65.9` to `61.0`, while DL20 dropped from `65.8` to `60.0`. Since Nomic-Embed was originally trained with MSMARCO documents, overfitting might account for the drop in performance. 
+
+### ModernBERT-Embed supports Tamber et al.'s work on InfoNCE loss
+ModernBERT-Embed behaved much closer to the finding described by Tamber et al. InfoNCE reduced NDCG@10 on DL19, DL20, SciFact, NFCorpus, and FiQA. ArguAna was the only exception, where NDCG@10 increased from `32.8` to `43.3`.
+
+The combined InfoNCE + KL loss did not recover the lost performance for ModernBERT-Embed. It improved over pure InfoNCE on SciFact, NFCorpus, and ArguAna, but still stayed below the base model on DL19, DL20, SciFact, and FiQA where results were available. This suggests that simply adding a listwise KL term is not automatically enough. New or alternative approaches would be needed to recover retrieval performance and ultimately approach reranker performance.
+
+### Combined loss was not a clear win in this replication work
+One of the most important findings from Tamber et al. is that combined contrastive and listwise distillation training consistently beat contrastive loss alone across several datasets. My reproduction did not show the same observation.
+
+For Nomic-Embed, the combined loss was worse than pure InfoNCE on most reported datasets. For ModernBERT-Embed, the combined loss improved over pure InfoNCE on several datasets, but it did not restore the original base model's retrieval effectiveness.
+
+This does not invalidate the usefulness of listwise distillation. The reranking results clearly show that RankT5-3B has ranking knowledge worth distilling. What the result does show is that a naive or lightly tuned hybrid objective is not guaranteed to recover performance. In fact, in this reproduction, rigorous hyperparameter tuning was performed with no significant retrieval recovery.
+
+## Conclusion
+This reproduction partially supports Tamber et al. but also complicates the main takeaway. For ModernBERT-Embed, contrastive fine-tuning often fell short. For Nomic-Embed, contrastive fine-tuning often helped, especially on SciFact and ArguAna. Therefore, the failure mode seems less like a universal limitation of InfoNCE and more like an interaction between the base retriever, pre-training data, and the fine-tuning objective.
+
+The most useful next step is not to abandon distillation, but to tune it more carefully. The reranker clearly improves top-ranked relevance, so there is signal to transfer. We would next look at alternative approaches beyong hyperparameter tuning. One such approach is weighted KL-divergence or contrastively weighted KL loss [5], since it is designed to make the distillation term focus more directly on separating relevant and non-relevant passages.
+
+## Code 
+Available [here](https://github.com/Adefioye/vector-search-experiment)
+
+Wandb logs [here](https://wandb.ai/abdulhakeemadefioye-personal/nomic-embed-text-v1-infonce-loss/workspace?nw=nwuserabdulhakeemadefioye) and [here](https://wandb.ai/abdulhakeemadefioye-personal/modernbert-embed-base-infonce-loss/workspace?nw=nwuserabdulhakeemadefioye) and [here](https://wandb.ai/abdulhakeemadefioye-personal/modernbert-embed-base-infonce+kl-loss?nw=nwuserabdulhakeemadefioye)
+
+## References
+1. Tamber, M. S., Kazi, S., Sourabh, V., & Lin, J. (2025). Conventional contrastive learning often falls short: Improving dense retrieval with cross-encoder listwise distillation and synthetic data. arXiv:2505.19274.
+2. Nomic AI. Nomic Embed Text v1. https://huggingface.co/nomic-ai/nomic-embed-text-v1
+3. Nomic AI. ModernBERT Embed Base. https://huggingface.co/nomic-ai/modernbert-embed-base
+4. RanT5-3B. https://huggingface.co/Soyoung97/RankT5-3b.
+5. Yang, Y., Qiao, Y., He, S., & Yang, T. (2024). Weighted KL-divergence for document ranking model refinement. arXiv:2406.05977.
+
+
+## Citation
+If you find this article useful, please cite it as:
+
+#### BibTex
+
+```text
+@article{abdulhakeem2025listwise-loss,
+  title={Listwise loss does not consistently makeup for InfoNCE loss},
+  author={Abdulhakeem, Adefioye},
+  year={2025},
+  month={November},
+  url={https://adefioye.github.io/blog/listwise-loss}
+}
+```
